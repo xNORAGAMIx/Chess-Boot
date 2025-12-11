@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { createInitialState, applyMove } from "./engine/engine";
+// src/App.jsx
+import React, { useState } from "react";
+import { createInitialState, applyMove, getLegalMoves } from "./engine/engine";
 
-// small utility: piece to unicode for display
+// Unicode mapping (correctly for white and black)
 const pieceToUnicode = (p) => {
   if (!p) return "";
   const map = {
@@ -14,7 +15,6 @@ const pieceToUnicode = (p) => {
 const toAlgebraic = ({ r, f }) => "abcdefgh"[f] + (8 - r);
 
 function stateToSerializable(s) {
-  // convert board to a compact notation (e.g. wP, bK, ..)
   const board = s.board.map((row) =>
     row.map((cell) => (cell ? `${cell.c}${cell.t.toUpperCase()}` : ".."))
   );
@@ -35,7 +35,6 @@ function stateToSerializable(s) {
 }
 
 function CompactBoard({ board }) {
-  // very small visual of the engine state (not interactive)
   return (
     <div className="grid grid-cols-8 gap-0 border border-gray-200 text-xs">
       {board.flatMap((row, r) =>
@@ -43,7 +42,8 @@ function CompactBoard({ board }) {
           <div
             key={`${r}-${f}`}
             className="w-8 h-8 flex items-center justify-center border-[1px] border-gray-100 bg-white"
-            title={`${"abcdefgh"[f]}${8 - r}`}>
+            title={`${"abcdefgh"[f]}${8 - r}`}
+          >
             {cell === ".." ? <span className="text-gray-300">·</span> : <span>{cell}</span>}
           </div>
         ))
@@ -94,55 +94,109 @@ function StateViewer({ state }) {
 
 export default function App() {
   const [state, setState] = useState(() => createInitialState());
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(null); // {r,f}
+  const [legalSet, setLegalSet] = useState(new Set()); // Set of 'r-f' strings
+  const [legalMoves, setLegalMoves] = useState([]); // array of move objects for selected
   const [message, setMessage] = useState("");
   const [showInspector, setShowInspector] = useState(false);
+  const [promoChoice, setPromoChoice] = useState(null); // { from, to, options: [ 'q','r','b','n' ] }
 
-  function handleSquareClick(r, f) {
+  function onSelectSquare(r, f) {
     const piece = state.board[r][f];
+
+    // If no selection, attempt to select a friendly piece and compute legal moves
     if (!selected) {
       if (piece && piece.c === state.turn) {
+        const legal = getLegalMoves(state, { r, f }); // engine-provided legal moves
+        const set = new Set(legal.map(m => `${m.to.r}-${m.to.f}`));
+        setLegalSet(set);
+        setLegalMoves(legal);
         setSelected({ r, f });
         setMessage(`Selected ${piece.t} at ${toAlgebraic({ r, f })}`);
       }
       return;
     }
 
+    // deselect if same square clicked
     if (selected.r === r && selected.f === f) {
-      setSelected(null);
-      setMessage("");
+      clearSelection();
       return;
     }
 
-    const move = { from: selected, to: { r, f } };
+    // if clicked a legal destination
+    const key = `${r}-${f}`;
+    if (!legalSet.has(key)) {
+      setMessage("Illegal destination — select a legal square or reselect piece.");
+      return;
+    }
 
+    // find the matching move object(s) for this destination
+    const candidates = legalMoves.filter(m => m.to.r === r && m.to.f === f);
+    if (candidates.length === 0) {
+      setMessage("No move found.");
+      clearSelection();
+      return;
+    }
+
+    // if promotion moves exist among candidates, prompt user
+    const promos = candidates.filter(m => m.promotion).map(m => m.promotion);
+    if (promos.length > 0) {
+      setPromoChoice({ from: selected, to: { r, f }, options: promos });
+      return;
+    }
+
+    // otherwise perform the (single) legal move (should be unique)
+    performMove(candidates[0]);
+  }
+
+  function performMove(move) {
     try {
       const next = applyMove(state, move);
       setState(next);
-      setSelected(null);
-      setMessage(`${toAlgebraic(selected)} → ${toAlgebraic({ r, f })}`);
+      setMessage(`${toAlgebraic(move.from)} → ${toAlgebraic(move.to)}`);
     } catch (err) {
-      console.error(err);
-      setMessage("Invalid move (engine rejected move).");
+      console.error("applyMove error:", err);
+      setMessage("Engine rejected move.");
+    } finally {
+      clearSelection();
     }
+  }
+
+  function choosePromotion(pieceLetter) {
+    if (!promoChoice) return;
+    const leg = getLegalMoves(state, promoChoice.from);
+    const move = leg.find(m => m.promotion === pieceLetter && m.to.r === promoChoice.to.r && m.to.f === promoChoice.to.f);
+    if (!move) {
+      setMessage("Promotion move not found.");
+      setPromoChoice(null);
+      clearSelection();
+      return;
+    }
+    performMove(move);
+    setPromoChoice(null);
+  }
+
+  function clearSelection() {
+    setSelected(null);
+    setLegalSet(new Set());
+    setLegalMoves([]);
   }
 
   function reset() {
     setState(createInitialState());
-    setSelected(null);
+    clearSelection();
     setMessage("");
+    setPromoChoice(null);
   }
 
   return (
     <div className="p-6 font-sans text-gray-900">
-      <h2 className="text-2xl font-semibold mb-4">Chess Prototype</h2>
+      <h2 className="text-2xl font-semibold mb-4">Chess Prototype (legal moves)</h2>
 
       <div className="flex gap-6 items-start">
         <div className="flex">
-          {/* Left ranks + board container */}
           <div>
             <div className="flex">
-              {/* Ranks column */}
               <div className="flex flex-col justify-between mr-1">
                 {Array.from({ length: 8 }, (_, i) => (
                   <div key={i} className="h-16 w-6 flex items-center justify-center text-sm text-gray-700">
@@ -151,13 +205,13 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Board */}
               <div className="inline-grid grid-cols-8 border-2 border-gray-800 divide-x-[1px] divide-y-[1px] divide-black/10">
                 {state.board.map((row, r) =>
                   row.map((cell, f) => {
                     const isLight = (r + f) % 2 === 0;
                     const bgClass = isLight ? "bg-[#f0d9b5]" : "bg-[#b58863]";
                     const isSelected = selected && selected.r === r && selected.f === f;
+                    const isLegal = legalSet.has(`${r}-${f}`);
 
                     const pieceColorClass = cell
                       ? cell.c === "w"
@@ -173,10 +227,11 @@ export default function App() {
                     return (
                       <div
                         key={`${r}-${f}`}
-                        onClick={() => handleSquareClick(r, f)}
+                        onClick={() => onSelectSquare(r, f)}
                         className={`w-16 h-16 flex items-center justify-center cursor-pointer box-border ${bgClass} ${
                           isSelected ? "ring-4 ring-blue-500 ring-inset" : ""
                         }`}
+                        style={{ position: "relative" }}
                       >
                         <span
                           className={`text-2xl select-none ${pieceColorClass}`}
@@ -184,6 +239,23 @@ export default function App() {
                         >
                           {pieceToUnicode(cell)}
                         </span>
+
+                        {/* legal destination dot */}
+                        {isLegal && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              width: 12,
+                              height: 12,
+                              borderRadius: 6,
+                              background: "rgba(59,130,246,0.95)",
+                              bottom: 6,
+                              right: 6,
+                              boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
+                            }}
+                            aria-hidden
+                          />
+                        )}
                       </div>
                     );
                   })
@@ -191,7 +263,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Files row */}
             <div className="grid grid-cols-8 mt-1 ml-7">
               {"abcdefgh".split("").map((f) => (
                 <div key={f} className="w-16 text-center text-sm text-gray-700">
@@ -226,7 +297,9 @@ export default function App() {
             <div className="mt-2 text-gray-700">{message}</div>
           </div>
 
-          <div className="mt-4 text-xs text-gray-500">Note: move legality is not enforced yet — next step is to add move generation and filter moves that leave king in check.</div>
+          <div className="mt-4 text-xs text-gray-500">
+            Click a friendly piece to see legal moves (blue dots). Click a dot to move. Promotions prompt choices.
+          </div>
 
           <div className="mt-3 flex gap-2 items-center">
             <button onClick={reset} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm">
@@ -247,11 +320,28 @@ export default function App() {
               Copy raw JSON
             </button>
           </div>
+
+          {promoChoice && (
+            <div className="mt-3 p-3 border rounded bg-white">
+              <div className="mb-2 text-sm font-medium">Choose promotion</div>
+              <div className="flex gap-2">
+                {promoChoice.options.map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => choosePromotion(opt)}
+                    className="px-3 py-1 rounded bg-blue-600 text-white text-sm"
+                  >
+                    {opt.toUpperCase()}
+                  </button>
+                ))}
+                <button onClick={() => { setPromoChoice(null); clearSelection(); }} className="px-3 py-1 rounded bg-gray-200 text-sm">Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Inspector rail */}
         {showInspector && (
-          <div className="">
+          <div>
             <StateViewer state={state} />
           </div>
         )}
