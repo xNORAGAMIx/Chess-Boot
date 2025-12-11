@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useState } from "react";
-import { createInitialState, applyMove, getLegalMoves } from "./engine/engine";
+import { createInitialState, applyMove, getLegalMoves, getGameStatus, isInCheck } from "./engine/engine";
 
 // Unicode mapping (correctly for white and black)
 const pieceToUnicode = (p) => {
@@ -101,17 +101,22 @@ export default function App() {
   const [showInspector, setShowInspector] = useState(false);
   const [promoChoice, setPromoChoice] = useState(null); // { from, to, options: [ 'q','r','b','n' ] }
 
+  // helper to refresh legal moves when selecting a piece
+  function selectPiece(r, f) {
+    const legal = getLegalMoves(state, { r, f });
+    const set = new Set(legal.map((m) => `${m.to.r}-${m.to.f}`));
+    setLegalSet(set);
+    setLegalMoves(legal);
+    setSelected({ r, f });
+  }
+
   function onSelectSquare(r, f) {
     const piece = state.board[r][f];
 
     // If no selection, attempt to select a friendly piece and compute legal moves
     if (!selected) {
       if (piece && piece.c === state.turn) {
-        const legal = getLegalMoves(state, { r, f }); // engine-provided legal moves
-        const set = new Set(legal.map(m => `${m.to.r}-${m.to.f}`));
-        setLegalSet(set);
-        setLegalMoves(legal);
-        setSelected({ r, f });
+        selectPiece(r, f);
         setMessage(`Selected ${piece.t} at ${toAlgebraic({ r, f })}`);
       }
       return;
@@ -131,7 +136,7 @@ export default function App() {
     }
 
     // find the matching move object(s) for this destination
-    const candidates = legalMoves.filter(m => m.to.r === r && m.to.f === f);
+    const candidates = legalMoves.filter((m) => m.to.r === r && m.to.f === f);
     if (candidates.length === 0) {
       setMessage("No move found.");
       clearSelection();
@@ -139,7 +144,7 @@ export default function App() {
     }
 
     // if promotion moves exist among candidates, prompt user
-    const promos = candidates.filter(m => m.promotion).map(m => m.promotion);
+    const promos = candidates.filter((m) => m.promotion).map((m) => m.promotion);
     if (promos.length > 0) {
       setPromoChoice({ from: selected, to: { r, f }, options: promos });
       return;
@@ -153,19 +158,35 @@ export default function App() {
     try {
       const next = applyMove(state, move);
       setState(next);
-      setMessage(`${toAlgebraic(move.from)} → ${toAlgebraic(move.to)}`);
+
+      // after move, decide message based on game status
+      const status = getGameStatus(next);
+      if (status.status === "checkmate") {
+        setMessage(`Checkmate — ${status.winner === "w" ? "White" : "Black"} wins`);
+      } else if (status.status === "stalemate") {
+        setMessage("Stalemate — draw");
+      } else if (status.status === "draw_50_moves") {
+        setMessage("Draw by 50-move rule");
+      } else if (isInCheck(next, next.turn)) {
+        setMessage(`${next.turn === "w" ? "White" : "Black"} to move — in check`);
+      } else {
+        setMessage(`${toAlgebraic(move.from)} → ${toAlgebraic(move.to)}`);
+      }
     } catch (err) {
       console.error("applyMove error:", err);
       setMessage("Engine rejected move.");
     } finally {
       clearSelection();
+      setPromoChoice(null);
     }
   }
 
   function choosePromotion(pieceLetter) {
     if (!promoChoice) return;
     const leg = getLegalMoves(state, promoChoice.from);
-    const move = leg.find(m => m.promotion === pieceLetter && m.to.r === promoChoice.to.r && m.to.f === promoChoice.to.f);
+    const move = leg.find(
+      (m) => m.promotion === pieceLetter && m.to.r === promoChoice.to.r && m.to.f === promoChoice.to.f
+    );
     if (!move) {
       setMessage("Promotion move not found.");
       setPromoChoice(null);
@@ -189,9 +210,16 @@ export default function App() {
     setPromoChoice(null);
   }
 
+  // last move highlighting (engine should populate state.lastMove)
+  const lastFromKey = state.lastMove ? `${state.lastMove.from.r}-${state.lastMove.from.f}` : null;
+  const lastToKey = state.lastMove ? `${state.lastMove.to.r}-${state.lastMove.to.f}` : null;
+
+  // show opponent-in-check indicator
+  const oppInCheck = isInCheck(state, state.turn === "w" ? "b" : "w");
+
   return (
     <div className="p-6 font-sans text-gray-900">
-      <h2 className="text-2xl font-semibold mb-4">Chess Prototype (legal moves)</h2>
+      <h2 className="text-2xl font-semibold mb-4">Chess Prototype </h2>
 
       <div className="flex gap-6 items-start">
         <div className="flex">
@@ -213,16 +241,13 @@ export default function App() {
                     const isSelected = selected && selected.r === r && selected.f === f;
                     const isLegal = legalSet.has(`${r}-${f}`);
 
-                    const pieceColorClass = cell
-                      ? cell.c === "w"
-                        ? "text-white"
-                        : "text-black"
-                      : "";
+                    const pieceColorClass = cell ? (cell.c === "w" ? "text-white" : "text-black") : "";
 
                     const textShadow =
-                      cell && cell.c === "w"
-                        ? "0 0 1px rgba(0,0,0,0.7)"
-                        : "0 0 1px rgba(255,255,255,0.7)";
+                      cell && cell.c === "w" ? "0 0 1px rgba(0,0,0,0.7)" : "0 0 1px rgba(255,255,255,0.7)";
+
+                    const thisKey = `${r}-${f}`;
+                    const isLast = thisKey === lastFromKey || thisKey === lastToKey;
 
                     return (
                       <div
@@ -231,12 +256,9 @@ export default function App() {
                         className={`w-16 h-16 flex items-center justify-center cursor-pointer box-border ${bgClass} ${
                           isSelected ? "ring-4 ring-blue-500 ring-inset" : ""
                         }`}
-                        style={{ position: "relative" }}
+                        style={{ position: "relative", background: isLast ? "#fff59d" : undefined }}
                       >
-                        <span
-                          className={`text-2xl select-none ${pieceColorClass}`}
-                          style={{ textShadow }}
-                        >
+                        <span className={`text-2xl select-none ${pieceColorClass}`} style={{ textShadow }}>
                           {pieceToUnicode(cell)}
                         </span>
 
@@ -338,6 +360,19 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* status / check / mate messages */}
+          <div className="mt-4">
+            {(() => {
+              const status = getGameStatus(state);
+              if (status.status === 'checkmate') return <div className="text-red-600 font-semibold">Checkmate — {status.winner === 'w' ? 'White' : 'Black'} wins</div>;
+              if (status.status === 'stalemate') return <div className="text-gray-700 font-semibold">Stalemate — draw</div>;
+              if (status.status === 'draw_50_moves') return <div className="text-gray-700 font-semibold">Draw — 50-move rule</div>;
+              if (isInCheck(state, state.turn)) return <div className="text-red-600 font-semibold">{state.turn === 'w' ? 'White' : 'Black'} to move — in check</div>;
+              if (oppInCheck) return <div className="text-red-600 font-semibold">Opponent in check</div>;
+              return null;
+            })()}
+          </div>
         </div>
 
         {showInspector && (
