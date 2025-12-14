@@ -1,6 +1,3 @@
-// engine/engine.js
-// CommonJS engine with attack detection, en-passant, castling, promotions, pseudo-legal & legal move filters.
-
 function createEmptyBoard() {
   return new Array(8).fill(null).map(() => new Array(8).fill(null));
 }
@@ -14,6 +11,7 @@ function createInitialState() {
   for (let f = 0; f < 8; f++) board[1][f] = { t: 'p', c: 'b' };
   for (let f = 0; f < 8; f++) board[6][f] = { t: 'p', c: 'w' };
   for (let f = 0; f < 8; f++) board[7][f] = { t: backRank[f], c: 'w' };
+
   return {
     board,
     turn: 'w',
@@ -23,26 +21,47 @@ function createInitialState() {
     blackCanCastleQ: true,
     enPassantTarget: null,
     halfmoveClock: 0,
-    fullmoveNumber: 1
+    fullmoveNumber: 1,
+    lastMove: null // { from:{r,f}, to:{r,f}, captured: {t,c} | null, promotion?, isEnPassant?, isCastling? }
   };
 }
 
+/* applyMove: trusts the move shape; returns new state (does not validate legality).
+   move: { from: {r,f}, to: {r,f}, promotion?, isEnPassant?, isCastling? }
+*/
 function applyMove(state, move) {
   const board = cloneBoard(state.board);
   const fromPiece = board[move.from.r][move.from.f];
   if (!fromPiece) throw new Error('No piece at from');
 
+  // figure out captured piece (for lastMove info)
+  let captured = null;
+  if (move.isEnPassant) {
+    const capRow = state.turn === 'w' ? move.to.r + 1 : move.to.r - 1;
+    captured = board[capRow][move.to.f];
+  } else {
+    captured = board[move.to.r][move.to.f];
+  }
+
+  // en-passant removal
   if (move.isEnPassant) {
     const capturedRow = state.turn === 'w' ? move.to.r + 1 : move.to.r - 1;
     board[capturedRow][move.to.f] = null;
   }
 
+  // castling rook movement
   if (move.isCastling && fromPiece.t === 'k') {
     const kingRow = move.from.r;
-    if (move.to.f === 6) { board[kingRow][5] = board[kingRow][7]; board[kingRow][7] = null; }
-    else if (move.to.f === 2) { board[kingRow][3] = board[kingRow][0]; board[kingRow][0] = null; }
+    if (move.to.f === 6) { // king-side
+      board[kingRow][5] = board[kingRow][7];
+      board[kingRow][7] = null;
+    } else if (move.to.f === 2) { // queen-side
+      board[kingRow][3] = board[kingRow][0];
+      board[kingRow][0] = null;
+    }
   }
 
+  // place piece (handle promotion)
   board[move.to.r][move.to.f] = move.promotion ? { t: move.promotion, c: fromPiece.c } : fromPiece;
   board[move.from.r][move.from.f] = null;
 
@@ -75,11 +94,11 @@ function applyMove(state, move) {
   }
 
   // halfmove clock
-  const wasCapture = (state.board[move.to.r] && state.board[move.to.r][move.to.f] !== null) && !move.isEnPassant;
+  const wasCapture = captured !== null && !move.isEnPassant;
   let h = state.halfmoveClock;
   if (fromPiece.t === 'p' || wasCapture) h = 0; else h++;
 
-  return {
+  const newState = {
     board,
     turn: state.turn === 'w' ? 'b' : 'w',
     whiteCanCastleK: wK,
@@ -88,8 +107,17 @@ function applyMove(state, move) {
     blackCanCastleQ: bQ,
     enPassantTarget: newEnPassant,
     halfmoveClock: h,
-    fullmoveNumber: state.turn === 'b' ? state.fullmoveNumber + 1 : state.fullmoveNumber
+    fullmoveNumber: state.turn === 'b' ? state.fullmoveNumber + 1 : state.fullmoveNumber,
+    lastMove: {
+      from: move.from,
+      to: move.to,
+      captured: captured ? { t: captured.t, c: captured.c } : null,
+      promotion: move.promotion || null,
+      isEnPassant: !!move.isEnPassant,
+      isCastling: !!move.isCastling
+    }
   };
+  return newState;
 }
 
 // attack detection
@@ -98,7 +126,7 @@ function isSquareAttacked(state, square, byColor) {
   const r = square.r, f = square.f;
   const enemy = byColor;
 
-  // pawn attacks (note board indexing: white pawns move upward => r decreases)
+  // pawn attacks (white pawns are moving 'up' (row decreasing))
   if (enemy === 'w') {
     const ar = r + 1;
     if (inside(ar, f-1) && board[ar][f-1] && board[ar][f-1].t === 'p' && board[ar][f-1].c === 'w') return true;
@@ -172,7 +200,7 @@ function isInCheck(state, color) {
   return isSquareAttacked(state, king, opp);
 }
 
-// PSEUDO-LEGAL moves generator (now includes promotion generation)
+// PSEUDO-LEGAL moves (with promotions & en-passant & castling candidates)
 function getPseudoLegalMoves(state, from) {
   const { board } = state; const p = board[from.r][from.f];
   if (!p) return [];
@@ -197,25 +225,21 @@ function getPseudoLegalMoves(state, from) {
       const t = board[rr][ff];
       if (!t || t.c !== color) moves.push({ from, to: { r: rr, f: ff }});
     }
-    // castling candidates (check rights & emptiness)
+    // castling candidates
     if (color === 'w' && from.r === 7 && from.f === 4) {
       if (state.whiteCanCastleK && !board[7][5] && !board[7][6]) {
-        const rook = board[7][7];
-        if (rook && rook.t === 'r' && rook.c === 'w') moves.push({ from, to: { r:7, f:6 }, isCastling: true });
+        const rook = board[7][7]; if (rook && rook.t === 'r' && rook.c === 'w') moves.push({ from, to: { r:7, f:6 }, isCastling: true });
       }
       if (state.whiteCanCastleQ && !board[7][3] && !board[7][2] && !board[7][1]) {
-        const rook = board[7][0];
-        if (rook && rook.t === 'r' && rook.c === 'w') moves.push({ from, to: { r:7, f:2 }, isCastling: true });
+        const rook = board[7][0]; if (rook && rook.t === 'r' && rook.c === 'w') moves.push({ from, to: { r:7, f:2 }, isCastling: true });
       }
     }
     if (color === 'b' && from.r === 0 && from.f === 4) {
       if (state.blackCanCastleK && !board[0][5] && !board[0][6]) {
-        const rook = board[0][7];
-        if (rook && rook.t === 'r' && rook.c === 'b') moves.push({ from, to: { r:0, f:6 }, isCastling: true });
+        const rook = board[0][7]; if (rook && rook.t === 'r' && rook.c === 'b') moves.push({ from, to: { r:0, f:6 }, isCastling: true });
       }
       if (state.blackCanCastleQ && !board[0][3] && !board[0][2] && !board[0][1]) {
-        const rook = board[0][0];
-        if (rook && rook.t === 'r' && rook.c === 'b') moves.push({ from, to: { r:0, f:2 }, isCastling: true });
+        const rook = board[0][0]; if (rook && rook.t === 'r' && rook.c === 'b') moves.push({ from, to: { r:0, f:2 }, isCastling: true });
       }
     }
     return moves;
@@ -227,20 +251,15 @@ function getPseudoLegalMoves(state, from) {
     const oneR = from.r + dir;
     const promotionRow = p.c === 'w' ? 0 : 7;
     if (inside(oneR, from.f) && !board[oneR][from.f]) {
-      // forward move
       if (oneR === promotionRow) {
         for (const promo of ['q','r','b','n']) moves.push({ from, to: { r: oneR, f: from.f }, promotion: promo });
       } else {
         moves.push({ from, to: { r: oneR, f: from.f }});
-        // double
         const startRow = p.c === 'w' ? 6 : 1;
         const twoR = from.r + dir*2;
-        if (from.r === startRow && inside(twoR,from.f) && !board[twoR][from.f]) {
-          moves.push({ from, to: { r: twoR, f: from.f }});
-        }
+        if (from.r === startRow && inside(twoR,from.f) && !board[twoR][from.f]) moves.push({ from, to: { r: twoR, f: from.f }});
       }
     }
-    // captures
     for (const df of [-1,1]) {
       const rr = from.r + dir, ff = from.f + df;
       if (!inside(rr,ff)) continue;
@@ -252,7 +271,6 @@ function getPseudoLegalMoves(state, from) {
           moves.push({ from, to: { r: rr, f: ff }});
         }
       }
-      // en passant capture
       if (state.enPassantTarget && state.enPassantTarget.r === rr && state.enPassantTarget.f === ff) {
         moves.push({ from, to: { r: rr, f: ff }, isEnPassant: true });
       }
@@ -282,13 +300,12 @@ function getPseudoLegalMoves(state, from) {
   return moves;
 }
 
-// getLegalMoves: apply castling safe-passage checks and filter out moves that leave king in check
+// Legal filtering (castling safe passage + simulation to prevent exposing king)
 function getLegalMoves(state, from) {
   const p = state.board[from.r][from.f];
   if (!p) return [];
   let moves = getPseudoLegalMoves(state, from);
 
-  // enforce castling extra conditions
   moves = moves.filter(m => {
     if (!m.isCastling) return true;
     if (isInCheck(state, p.c)) return false;
@@ -303,7 +320,6 @@ function getLegalMoves(state, from) {
     return true;
   });
 
-  // filter out moves that leave own king in check
   const legal = moves.filter(m => {
     const ns = applyMove(state, m);
     return !isInCheck(ns, p.c);
@@ -312,6 +328,58 @@ function getLegalMoves(state, from) {
   return legal;
 }
 
-module.exports = {
-  createInitialState, applyMove, isSquareAttacked, isInCheck, getPseudoLegalMoves, getLegalMoves
+function getAllLegalMoves(state, color) {
+  const moves = [];
+  for (let r=0;r<8;r++) for (let f=0;f<8;f++) {
+    const p = state.board[r][f];
+    if (p && p.c === color) {
+      const legal = getLegalMoves(state, { r,f });
+      for (const m of legal) moves.push(m);
+    }
+  }
+  return moves;
+}
+
+function isCheckmate(state, color) {
+  // color = side to move
+  if (!isInCheck(state, color)) return false;
+  const moves = getAllLegalMoves(state, color);
+  return moves.length === 0;
+}
+
+function isStalemate(state, color) {
+  if (isInCheck(state, color)) return false;
+  const moves = getAllLegalMoves(state, color);
+  return moves.length === 0;
+}
+
+function getGameStatus(state) {
+  // status from perspective of the side to move (state.turn)
+  const color = state.turn;
+  if (isCheckmate(state, color)) {
+    return { status: 'checkmate', winner: color === 'w' ? 'b' : 'w' };
+  }
+  if (isStalemate(state, color)) {
+    return { status: 'stalemate', winner: null };
+  }
+  if (state.halfmoveClock >= 100) {
+    return { status: 'draw_50_moves', winner: null };
+  }
+  if (isInCheck(state, color)) {
+    return { status: 'check', winner: null };
+  }
+  return { status: 'ongoing', winner: null };
+}
+
+export {
+  createInitialState,
+  applyMove,
+  isSquareAttacked,
+  isInCheck,
+  getPseudoLegalMoves,
+  getLegalMoves,
+  getAllLegalMoves,
+  isCheckmate,
+  isStalemate,
+  getGameStatus
 };
