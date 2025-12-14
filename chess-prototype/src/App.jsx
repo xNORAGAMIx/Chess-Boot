@@ -1,8 +1,21 @@
-// src/App.jsx
-import React, { useState } from "react";
-import { createInitialState, applyMove, getLegalMoves, getGameStatus, isInCheck } from "./engine/engine";
+const INITIAL_TIME = 10 * 60; // seconds
 
-// Unicode mapping (correctly for white and black)
+import { useEffect, useState } from "react";
+import {
+  createInitialState,
+  applyMove,
+  getLegalMoves,
+  getGameStatus,
+  calculateMaterial,
+} from "./engine/engine";
+
+function serializeStateForStorage(state) {
+  const { zobrist, positionCounts, ...rest } = state;
+
+  return rest;
+}
+
+// piece to unicode
 const pieceToUnicode = (p) => {
   if (!p) return "";
   const map = {
@@ -14,6 +27,9 @@ const pieceToUnicode = (p) => {
 
 const toAlgebraic = ({ r, f }) => "abcdefgh"[f] + (8 - r);
 
+/* =========================
+   State inspector (UNCHANGED)
+========================= */
 function stateToSerializable(s) {
   const board = s.board.map((row) =>
     row.map((cell) => (cell ? `${cell.c}${cell.t.toUpperCase()}` : ".."))
@@ -42,9 +58,12 @@ function CompactBoard({ board }) {
           <div
             key={`${r}-${f}`}
             className="w-8 h-8 flex items-center justify-center border-[1px] border-gray-100 bg-white"
-            title={`${"abcdefgh"[f]}${8 - r}`}
           >
-            {cell === ".." ? <span className="text-gray-300">·</span> : <span>{cell}</span>}
+            {cell === ".." ? (
+              <span className="text-gray-300">·</span>
+            ) : (
+              <span>{cell}</span>
+            )}
           </div>
         ))
       )}
@@ -59,327 +78,341 @@ function StateViewer({ state }) {
   return (
     <div className="p-3 bg-gray-50 rounded border border-gray-200 w-80">
       <div className="mb-2 text-sm font-medium">State inspector</div>
-
       <div className="mb-2">
         <CompactBoard board={serial.board} />
       </div>
-
-      <div className="mb-2 text-[11px] text-gray-600 whitespace-pre-wrap overflow-auto max-h-40">
-        <pre className="text-[11px]">{pretty}</pre>
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          onClick={() => navigator.clipboard?.writeText(pretty)}
-          className="px-2 py-1 bg-gray-200 rounded text-xs"
-        >
-          Copy JSON
-        </button>
-        <button
-          onClick={() => {
-            const rows = state.board.map((row) =>
-              row.map((c) => (c ? `${c.c}${c.t}` : "..")).join("")
-            );
-            const fenLike = `${rows.join("/")} ${state.turn} ${state.whiteCanCastleK ? "K" : ""}${state.whiteCanCastleQ ? "Q" : ""}${state.blackCanCastleK ? "k" : ""}${state.blackCanCastleQ ? "q" : ""} ${state.enPassantTarget ? toAlgebraic(state.enPassantTarget) : "-"} ${state.halfmoveClock} ${state.fullmoveNumber}`;
-            navigator.clipboard?.writeText(fenLike);
-          }}
-          className="px-2 py-1 bg-gray-200 rounded text-xs"
-        >
-          Copy FEN-like
-        </button>
-      </div>
+      <pre className="text-[11px] max-h-40 overflow-auto">{pretty}</pre>
     </div>
   );
 }
 
+/* =========================
+   Main App
+========================= */
 export default function App() {
-  const [state, setState] = useState(() => createInitialState());
-  const [selected, setSelected] = useState(null); // {r,f}
-  const [legalSet, setLegalSet] = useState(new Set()); // Set of 'r-f' strings
-  const [legalMoves, setLegalMoves] = useState([]); // array of move objects for selected
+  const [state, setState] = useState(() => {
+    const saved = localStorage.getItem("chess-state");
+    if (!saved) return createInitialState();
+
+    const parsed = JSON.parse(saved);
+    const fresh = createInitialState();
+
+    return {
+      ...fresh, // restores zobrist, maps, internals
+      ...parsed, // restores board, moves, clocks
+    };
+  });
+
+  const [selected, setSelected] = useState(null);
+  const [legalSet, setLegalSet] = useState(new Set());
+  const [legalMoves, setLegalMoves] = useState([]);
+  const [promoChoice, setPromoChoice] = useState(null);
   const [message, setMessage] = useState("");
   const [showInspector, setShowInspector] = useState(false);
-  const [promoChoice, setPromoChoice] = useState(null); // { from, to, options: [ 'q','r','b','n' ] }
+  const [halfCounter, setHalfCounter] = useState(null);
+  const [time, setTime] = useState({
+    w: INITIAL_TIME,
+    b: INITIAL_TIME,
+  });
 
-  // helper to refresh legal moves when selecting a piece
+  const [running, setRunning] = useState(true);
+
+  const material = calculateMaterial(state.board);
+  const [score, setScore] = useState({ w: 0, b: 0 });
+
+  // persist state
+  useEffect(() => {
+    const safeState = serializeStateForStorage(state);
+    localStorage.setItem("chess-state", JSON.stringify(safeState));
+  }, [state]);
+
+  useEffect(() => {
+    if (!running) return;
+
+    const interval = setInterval(() => {
+      setTime((t) => {
+        const side = state.turn;
+        if (t[side] <= 0) return t;
+
+        return {
+          ...t,
+          [side]: t[side] - 1,
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [state.turn, running]);
+
+  useEffect(() => {
+    if (time.w <= 0) {
+      setMessage("White lost on time — Black wins");
+      setRunning(false);
+    }
+    if (time.b <= 0) {
+      setMessage("Black lost on time — White wins");
+      setRunning(false);
+    }
+  }, [time]);
+
   function selectPiece(r, f) {
     const legal = getLegalMoves(state, { r, f });
-    const set = new Set(legal.map((m) => `${m.to.r}-${m.to.f}`));
-    setLegalSet(set);
     setLegalMoves(legal);
+    setLegalSet(new Set(legal.map((m) => `${m.to.r}-${m.to.f}`)));
     setSelected({ r, f });
+  }
+
+  function clearSelection() {
+    setSelected(null);
+    setLegalMoves([]);
+    setLegalSet(new Set());
   }
 
   function onSelectSquare(r, f) {
     const piece = state.board[r][f];
 
-    // If no selection, attempt to select a friendly piece and compute legal moves
     if (!selected) {
-      if (piece && piece.c === state.turn) {
-        selectPiece(r, f);
-        setMessage(`Selected ${piece.t} at ${toAlgebraic({ r, f })}`);
-      }
+      if (piece && piece.c === state.turn) selectPiece(r, f);
       return;
     }
 
-    // deselect if same square clicked
     if (selected.r === r && selected.f === f) {
       clearSelection();
       return;
     }
 
-    // if clicked a legal destination
     const key = `${r}-${f}`;
     if (!legalSet.has(key)) {
-      setMessage("Illegal destination — select a legal square or reselect piece.");
+      clearSelection(); // reset instead of silent ignore
       return;
     }
 
-    // find the matching move object(s) for this destination
     const candidates = legalMoves.filter((m) => m.to.r === r && m.to.f === f);
-    if (candidates.length === 0) {
-      setMessage("No move found.");
-      clearSelection();
+    const promos = candidates.filter((m) => m.promotion);
+
+    if (promos.length) {
+      setPromoChoice({
+        from: selected,
+        to: { r, f },
+        options: promos.map((p) => p.promotion),
+      });
       return;
     }
 
-    // if promotion moves exist among candidates, prompt user
-    const promos = candidates.filter((m) => m.promotion).map((m) => m.promotion);
-    if (promos.length > 0) {
-      setPromoChoice({ from: selected, to: { r, f }, options: promos });
-      return;
-    }
-
-    // otherwise perform the (single) legal move (should be unique)
     performMove(candidates[0]);
   }
 
   function performMove(move) {
-    try {
-      const next = applyMove(state, move);
-      setState(next);
+    const piece = state.board[move.from.r][move.from.f];
 
-      // after move, decide message based on game status
-      const status = getGameStatus(next);
-      if (status.status === "checkmate") {
-        setMessage(`Checkmate — ${status.winner === "w" ? "White" : "Black"} wins`);
-      } else if (status.status === "stalemate") {
-        setMessage("Stalemate — draw");
-      } else if (status.status === "draw_50_moves") {
-        setMessage("Draw by 50-move rule");
-      } else if (isInCheck(next, next.turn)) {
-        setMessage(`${next.turn === "w" ? "White" : "Black"} to move — in check`);
-      } else {
-        setMessage(`${toAlgebraic(move.from)} → ${toAlgebraic(move.to)}`);
-      }
-    } catch (err) {
-      console.error("applyMove error:", err);
-      setMessage("Engine rejected move.");
-    } finally {
-      clearSelection();
-      setPromoChoice(null);
-    }
-  }
-
-  function choosePromotion(pieceLetter) {
-    if (!promoChoice) return;
-    const leg = getLegalMoves(state, promoChoice.from);
-    const move = leg.find(
-      (m) => m.promotion === pieceLetter && m.to.r === promoChoice.to.r && m.to.f === promoChoice.to.f
-    );
-    if (!move) {
-      setMessage("Promotion move not found.");
-      setPromoChoice(null);
-      clearSelection();
-      return;
-    }
-    performMove(move);
+    const next = applyMove(state, move);
+    setState(next);
+    setHalfCounter(next.halfmoveClock);
+    console.log(next.halfmoveClock);
+    clearSelection();
     setPromoChoice(null);
+
+    const status = getGameStatus(next);
+    if (status.status === "checkmate") {
+      setRunning(false);
+      setScore((s) =>
+        status.winner === "w" ? { w: s.w + 1, b: s.b } : { w: s.w, b: s.b + 1 }
+      );
+      setMessage(
+        `Checkmate — ${status.winner === "w" ? "White" : "Black"} wins`
+      );
+    } else if(status.status === "draw_50_moves") {
+      setMessage("Draw - Halfmove")
+    } else if (status.status === "stalemate") {
+      setRunning(false);
+      setScore((s) => ({ w: s.w + 0.5, b: s.b + 0.5 }));
+      setMessage("Stalemate — draw");
+    } else if (next.threefoldAvailable) {
+      setMessage("Threefold repetition available");
+    } else {
+      setMessage(next.moveHistory.at(-1));
+    }
   }
 
-  function clearSelection() {
+  function choosePromotion(promo) {
+    const move = legalMoves.find(
+      (m) =>
+        m.promotion === promo &&
+        m.to.r === promoChoice.to.r &&
+        m.to.f === promoChoice.to.f
+    );
+    performMove(move);
+  }
+
+  function claimDraw() {
+    alert("Draw claimed by threefold repetition");
+    localStorage.removeItem("chess-state");
+    setState(createInitialState());
+  }
+
+  function exportPGN() {
+    const pgn = state.moveHistory
+      .map((m, i) => (i % 2 === 0 ? `${Math.floor(i / 2) + 1}. ${m}` : m))
+      .join(" ");
+    navigator.clipboard.writeText(pgn);
+  }
+
+  function resetGame() {
+    localStorage.clear();
+    setState(createInitialState());
     setSelected(null);
     setLegalSet(new Set());
     setLegalMoves([]);
-  }
-
-  function reset() {
-    setState(createInitialState());
-    clearSelection();
-    setMessage("");
     setPromoChoice(null);
+    setMessage("");
+    setShowInspector(false);
+    setTime({ w: INITIAL_TIME, b: INITIAL_TIME });
+    setRunning(true);
   }
 
-  // last move highlighting (engine should populate state.lastMove)
-  const lastFromKey = state.lastMove ? `${state.lastMove.from.r}-${state.lastMove.from.f}` : null;
-  const lastToKey = state.lastMove ? `${state.lastMove.to.r}-${state.lastMove.to.f}` : null;
-
-  // show opponent-in-check indicator
-  const oppInCheck = isInCheck(state, state.turn === "w" ? "b" : "w");
+  const lastFrom = state.lastMove
+    ? `${state.lastMove.from.r}-${state.lastMove.from.f}`
+    : null;
+  const lastTo = state.lastMove
+    ? `${state.lastMove.to.r}-${state.lastMove.to.f}`
+    : null;
 
   return (
-    <div className="p-6 font-sans text-gray-900">
-      <h2 className="text-2xl font-semibold mb-4">Chess Prototype </h2>
+    <div className="p-6">
+      <h2 className="text-2xl font-semibold mb-4">Chess Prototype</h2>
 
-      <div className="flex gap-6 items-start">
-        <div className="flex">
-          <div>
-            <div className="flex">
-              <div className="flex flex-col justify-between mr-1">
-                {Array.from({ length: 8 }, (_, i) => (
-                  <div key={i} className="h-16 w-6 flex items-center justify-center text-sm text-gray-700">
-                    {8 - i}
+      <div className="flex gap-6">
+        {/* Board */}
+        <div>
+          <div className="grid grid-cols-8">
+            {state.board.map((row, r) =>
+              row.map((cell, f) => {
+                const key = `${r}-${f}`;
+                const isLight = (r + f) % 2 === 0;
+                const isLegal = legalSet.has(key);
+                const isLast = key === lastFrom || key === lastTo;
+
+                const pieceColorClass = cell
+                  ? cell.c === "w"
+                    ? "text-white"
+                    : "text-black"
+                  : "";
+
+                const textShadow =
+                  cell && cell.c === "w"
+                    ? "0 0 1px rgba(255, 255, 255, 1)"
+                    : "0 0 1px rgba(255, 255, 255, 0)";
+
+                return (
+                  <div
+                    key={key}
+                    onClick={() => onSelectSquare(r, f)}
+                    className={`w-16 h-16 flex items-center justify-center cursor-pointer
+                      ${isLight ? "bg-[#f0d9b5]" : "bg-[#b58863]"}
+                      ${isLast ? "bg-green-600 opacity-80" : ""}`}
+                    style={{ position: "relative" }}
+                  >
+                    <span
+                      className={`text-4xl ${pieceColorClass}`}
+                      style={{ textShadow }}
+                    >
+                      {pieceToUnicode(cell)}
+                    </span>
+                    {isLegal && (
+                      <div className="absolute w-16 h-16 bg-blue-500 opacity-40" />
+                    )}
                   </div>
-                ))}
-              </div>
+                );
+              })
+            )}
+          </div>
 
-              <div className="inline-grid grid-cols-8 border-2 border-gray-800 divide-x-[1px] divide-y-[1px] divide-black/10">
-                {state.board.map((row, r) =>
-                  row.map((cell, f) => {
-                    const isLight = (r + f) % 2 === 0;
-                    const bgClass = isLight ? "bg-[#f0d9b5]" : "bg-[#b58863]";
-                    const isSelected = selected && selected.r === r && selected.f === f;
-                    const isLegal = legalSet.has(`${r}-${f}`);
-
-                    const pieceColorClass = cell ? (cell.c === "w" ? "text-white" : "text-black") : "";
-
-                    const textShadow =
-                      cell && cell.c === "w" ? "0 0 1px rgba(0,0,0,0.7)" : "0 0 1px rgba(255,255,255,0.7)";
-
-                    const thisKey = `${r}-${f}`;
-                    const isLast = thisKey === lastFromKey || thisKey === lastToKey;
-
-                    return (
-                      <div
-                        key={`${r}-${f}`}
-                        onClick={() => onSelectSquare(r, f)}
-                        className={`w-16 h-16 flex items-center justify-center cursor-pointer box-border ${bgClass} ${
-                          isSelected ? "ring-4 ring-blue-500 ring-inset" : ""
-                        }`}
-                        style={{ position: "relative", background: isLast ? "#fff59d" : undefined }}
-                      >
-                        <span className={`text-2xl select-none ${pieceColorClass}`} style={{ textShadow }}>
-                          {pieceToUnicode(cell)}
-                        </span>
-
-                        {/* legal destination dot */}
-                        {isLegal && (
-                          <div
-                            style={{
-                              position: "absolute",
-                              width: 12,
-                              height: 12,
-                              borderRadius: 6,
-                              background: "rgba(59,130,246,0.95)",
-                              bottom: 6,
-                              right: 6,
-                              boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
-                            }}
-                            aria-hidden
-                          />
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-8 mt-1 ml-7">
-              {"abcdefgh".split("").map((f) => (
-                <div key={f} className="w-16 text-center text-sm text-gray-700">
-                  {f}
-                </div>
+          {/* Promotion */}
+          {promoChoice && (
+            <div className="mt-3 flex gap-2">
+              {promoChoice.options.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => choosePromotion(p)}
+                  className="px-3 py-1 bg-blue-600 text-white rounded"
+                >
+                  {p.toUpperCase()}
+                </button>
               ))}
             </div>
-          </div>
+          )}
         </div>
 
-        <div className="w-72 text-sm text-gray-800">
-          <div className="mb-2">
-            <strong>Turn:</strong> {state.turn === "w" ? "White" : "Black"}
+        {/* Sidebar */}
+        <div className="w-72 text-sm">
+          {/* Material */}
+          <div className="mt-3">
+            <strong>Material</strong>
+            <div>White: {material.w}</div>
+            <div>Black: {material.b}</div>
           </div>
-          <div className="mb-2">
-            <strong>En passant:</strong> {state.enPassantTarget ? toAlgebraic(state.enPassantTarget) : "—"}
-          </div>
-
-          <div className="mb-2">
-            <strong>Castling:</strong>
+          {/* Clock */}
+          <div className="mt-3">
+            <strong>Clock</strong>
             <div className="mt-1">
-              <span className="block">W: {state.whiteCanCastleK ? "K" : "-"} {state.whiteCanCastleQ ? "Q" : "-"}</span>
-              <span className="block">B: {state.blackCanCastleK ? "K" : "-"} {state.blackCanCastleQ ? "Q" : "-"}</span>
+              <div className={state.turn === "w" ? "font-bold" : ""}>
+                White: {Math.floor(time.w / 60)}:
+                {String(time.w % 60).padStart(2, "0")}
+              </div>
+              <div className={state.turn === "b" ? "font-bold" : ""}>
+                Black: {Math.floor(time.b / 60)}:
+                {String(time.b % 60).padStart(2, "0")}
+              </div>
             </div>
           </div>
-
-          <div className="mb-2"><strong>Halfmove:</strong> {state.halfmoveClock}</div>
-          <div className="mb-2"><strong>Fullmove:</strong> {state.fullmoveNumber}</div>
-
+          <div>
+            <strong>Turn:</strong> {state.turn === "w" ? "White" : "Black"}
+          </div>
+          <div className="mt-2 text-gray-700">Halfmove Counter: {halfCounter}</div>
+          <div className="mt-2 text-gray-700">{message}</div>
           <div className="mt-4">
-            <strong>Last:</strong>
-            <div className="mt-2 text-gray-700">{message}</div>
+            <strong>Moves</strong>
+            <ol className="mt-1 space-y-1">
+              {state.moveHistory.map((m, i) => (
+                <li key={i}>
+                  {i % 2 === 0 ? `${Math.floor(i / 2) + 1}. ` : ""}
+                  {m}
+                </li>
+              ))}
+            </ol>
           </div>
-
-          <div className="mt-4 text-xs text-gray-500">
-            Click a friendly piece to see legal moves (blue dots). Click a dot to move. Promotions prompt choices.
-          </div>
-
-          <div className="mt-3 flex gap-2 items-center">
-            <button onClick={reset} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm">
-              Reset
+          {state.threefoldAvailable && (
+            <button
+              onClick={claimDraw}
+              className="mt-3 px-3 py-1 bg-gray-200 rounded"
+            >
+              Claim draw
             </button>
-
+          )}
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={exportPGN}
+              className="px-3 py-1 bg-gray-200 rounded"
+            >
+              Copy PGN
+            </button>
             <button
               onClick={() => setShowInspector((s) => !s)}
-              className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+              className="px-3 py-1 bg-gray-200 rounded"
             >
               {showInspector ? "Hide state" : "Show state"}
             </button>
 
             <button
-              onClick={() => navigator.clipboard?.writeText(JSON.stringify(state))}
-              className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+              onClick={resetGame}
+              className="px-3 py-1 bg-gray-200 rounded"
             >
-              Copy raw JSON
+              Reset
             </button>
-          </div>
-
-          {promoChoice && (
-            <div className="mt-3 p-3 border rounded bg-white">
-              <div className="mb-2 text-sm font-medium">Choose promotion</div>
-              <div className="flex gap-2">
-                {promoChoice.options.map((opt) => (
-                  <button
-                    key={opt}
-                    onClick={() => choosePromotion(opt)}
-                    className="px-3 py-1 rounded bg-blue-600 text-white text-sm"
-                  >
-                    {opt.toUpperCase()}
-                  </button>
-                ))}
-                <button onClick={() => { setPromoChoice(null); clearSelection(); }} className="px-3 py-1 rounded bg-gray-200 text-sm">Cancel</button>
-              </div>
-            </div>
-          )}
-
-          {/* status / check / mate messages */}
-          <div className="mt-4">
-            {(() => {
-              const status = getGameStatus(state);
-              if (status.status === 'checkmate') return <div className="text-red-600 font-semibold">Checkmate — {status.winner === 'w' ? 'White' : 'Black'} wins</div>;
-              if (status.status === 'stalemate') return <div className="text-gray-700 font-semibold">Stalemate — draw</div>;
-              if (status.status === 'draw_50_moves') return <div className="text-gray-700 font-semibold">Draw — 50-move rule</div>;
-              if (isInCheck(state, state.turn)) return <div className="text-red-600 font-semibold">{state.turn === 'w' ? 'White' : 'Black'} to move — in check</div>;
-              if (oppInCheck) return <div className="text-red-600 font-semibold">Opponent in check</div>;
-              return null;
-            })()}
           </div>
         </div>
 
-        {showInspector && (
-          <div>
-            <StateViewer state={state} />
-          </div>
-        )}
+        {showInspector && <StateViewer state={state} />}
       </div>
     </div>
   );
